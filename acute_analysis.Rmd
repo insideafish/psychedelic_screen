@@ -1,0 +1,376 @@
+---
+title: "psych_30min_tdmvelturn"
+output: html_document
+---
+
+load packages
+```{r}
+library(tidyverse)
+library(plotrix)
+library(emmeans)
+library(purrr)
+library(broom)
+library(forcats)
+library(ggplot2)
+library(devtools)
+library(ggrastr)
+library(rstatix)
+library(tibble)
+library(PMCMRplus)
+library(ggnewscale)
+library(cowplot)
+
+```
+
+```{r}
+excel.names <- c("Experiment", 
+                 "Treatment", 
+                 "Trial", 
+                 "Well",
+                 "Time", 
+                 "DistanceMoved", 
+                 "Velocity", 
+                 "Freezing_freq", 
+                 "Freezing_dur", 
+                 "Cruising_freq", 
+                 "Cruising_dur", 
+                 "Bursting_freq", 
+                 "Bursting_dur", 
+                 "Turn", 
+                 "Ang_vel", 
+                 "Meander_mean", 
+                 "Meander_total")
+```
+
+upload data
+```{r}
+psych <- read.csv("Statistics-Acute Exposures_10182022.csv", 
+                skip = 4, 
+                col.names = excel.names, ) %>% 
+  filter(Time == "0:00:00-0:30:00") %>% 
+  mutate(Treatment = as.factor(Treatment),
+         Trial = as.factor(Trial),
+         Well = as.factor(Well))
+
+```
+
+tidy the data
+```{r}
+#Excluding frequencies from further analysis
+
+tidymaster.forstat <- psych %>% 
+  unite(newID, Experiment, Trial, Well, sep = "_") %>%
+  select(-Time) %>% 
+  group_by(Treatment, newID) %>% 
+  summarise(MeanDistance = mean(DistanceMoved, na.rm = T), 
+            MeanVelocity = mean(Velocity, na.rm = T), 
+            FD = mean(Freezing_dur, na.rm = T),
+            CD = mean(Cruising_dur, na.rm = T),
+            BD = mean(Bursting_dur, na.rm = T),
+            Turn = mean(Turn, na.rm = T),
+            AngV = mean(Ang_vel, na.rm = T),
+            Mmean = mean(Meander_mean, na.rm = T),
+            Mtot = mean(Meander_total, na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate(Treatment = as.factor(Treatment),
+         newID = as.factor(newID)) %>% 
+   separate(col = Treatment, into = c("Compound", "Concentration"), sep =" ", remove=F) %>% 
+  mutate(Compound = as.factor(Compound), 
+         Concentration = as.factor(Concentration), 
+         Concentration = fct_relevel(Concentration, "DMSO", "0.1", "0.3", "1", "10")) %>% 
+  mutate(Compound = fct_recode(Compound, "AMPH" = "Amp", 
+                              "COCN" ="Cocaine", 
+                              "DMT" = "DMT", 
+                              "DOI" = "DOI", 
+                            "IBO"  = "Ibo",
+                            "KET" = "Ket",
+                              "LSD" = "LSD", 
+                              "MDA" = "MDA", 
+                              "MDMA" = "MDMA", 
+                              "METH" = "Meth", 
+                              "PSI" = "Psilocin", 
+                              "PSY" = "Psilocybin", 
+                              "SCOP" = "Scopolamine"))
+  
+
+
+#How many replicates per treatment (n = x - x)
+
+replicatecheck <- tidymaster.forstat %>%
+  group_by(Treatment) %>% 
+  tally()
+
+min(replicatecheck$n) #min
+max(replicatecheck$n) #max
+
+```
+
+Create dotplot for supplemental figure
+```{r}
+
+xlabel <- expression(Treatment~(mu*M)) #create label for x axis
+
+all_forgraph <- tidymaster.forstat %>%
+  gather(Variable, Value, MeanDistance, MeanVelocity, FD, CD, BD, Turn, AngV, Mmean, Mtot) %>% 
+  mutate(Variable = as.factor(Variable), 
+         Concentration = fct_relevel(Concentration, "DMSO", "0.1", "0.3", "1", "3", "10"),
+         Variable = fct_recode(Variable, "Mean\nDistance\n(mm)" = "MeanDistance", 
+                                  "Mean\nVelocity\n(mm/s)" = "MeanVelocity", 
+                                  "Freezing\nDuration\n(s)" = "FD", 
+                                  "Cruising\nDuration\n(s)" = "CD",
+                                  "Bursting\nDuration\n(s)" = "BD",
+                                  "Turn Angle\n(Degree(°))" = "Turn", "Angular\nVelocity\n(°/s)" = "AngV", 
+                                  "Mean\nMeander\n(°/mm)" = "Mmean", "Total\nMeander\n(°/mm)" = "Mtot"),
+         Variable = fct_relevel(Variable, "Mean\nDistance\n(mm)", "Mean\nVelocity\n(mm/s)", "Freezing\nDuration\n(s)", 
+                                "Cruising\nDuration\n(s)", "Bursting\nDuration\n(s)", "Turn Angle\n(Degree(°))", 
+                                "Angular\nVelocity\n(°/s)", "Mean\nMeander\n(°/mm)","Total\nMeander\n(°/mm)"), 
+         Compound = fct_relevel(Compound, "AMPH", "MDA", "MDMA", "METH", "COCN", "LSD", "DOI", "DMT", "PSI", "PSY", 
+                                "IBO", "KET", ))
+                                
+                                
+all_dotplot <- all_forgraph %>% 
+  ggplot(aes(x=Concentration, y = Value, color=Concentration)) +
+  geom_point_rast(na.rm = T, alpha = 0.7, raster.dpi = 100) +
+   stat_summary(fun.data = "mean_cl_normal",
+               geom = "errorbar",
+               col = "black",
+               width = 0.2, size = 0.5) +
+  stat_summary(fun="mean", geom="point", 
+               col="black", size=1) +
+  facet_grid(Variable ~ Compound, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45, size = 6.5), 
+        strip.text = element_text(size = 9), 
+        axis.title = element_text(size = 12)) +
+  xlab(label = xlabel) +
+    labs(title = "Acute Exposure (5 dpf)",
+      color = xlabel)
+  
+
+all_dotplot
+
+ggsave(filename = "acute_dotplotall.pdf", plot = all_dotplot, units = "in", width = 12, height = 12 )
+
+
+```
+
+
+Stats
+```{r}
+#SHAPIRO- test for normal distribution
+A_shapiro <- tidymaster.forstat %>%
+  gather(Variable, Value, -Treatment, -newID, -Compound, -Concentration) %>% 
+  group_by(Variable, Compound) %>% 
+  nest() %>% 
+  ungroup() %>% 
+  mutate(shapiro = map(data, ~tidy(shapiro.test(.x$Value)))) %>%
+  unnest(shapiro)
+View(A_shapiro)
+#most not gaussian
+
+
+#LEVENES- test for homogeneity of variances
+A_levene <- tidymaster.forstat %>%
+ gather(Variable, Value, -Treatment, -newID, -Compound, -Concentration) %>% 
+  group_by(Variable, Compound) %>% 
+  nest() %>% 
+  ungroup() %>% 
+  mutate(levene = map(data, ~levene_test(.x, Value ~ Treatment))) %>% 
+  unnest(levene) 
+View(A_levene)
+#most not homogenious
+
+#KRUSKAL WALLIS - non-parametric ANOVA
+A_KRUSKAL <- tidymaster.forstat %>%
+  gather(Variable, Value, -Treatment, -newID, -Compound, -Concentration) %>% 
+  group_by(Variable, Compound) %>% 
+  nest() %>% 
+  ungroup() %>% 
+  mutate(kruskal = map(data, ~kruskal_test(.x, Value ~ Treatment))) %>% 
+  unnest(kruskal) 
+View(A_KRUSKAL)
+
+#DUNNET- posthoc treatment vs control
+A_dunnetx <- tidymaster.forstat %>% 
+  gather(Variable, Value, -Treatment, -newID, -Compound, -Concentration) %>% 
+  group_by(Variable, Compound) %>% 
+  nest() %>% 
+  mutate(model= map(data, ~PMCMRplus::kwManyOneDunnTest(x= .x$Value, g= .x$Concentration, p.adjust.method="holm") %>% 
+                       toTidy())) %>%
+  unnest(model) %>%
+  mutate(significant = case_when(p.value > 0.05 ~ "ns",
+                                  p.value <= 0.01 ~ "**",
+                                  p.value <= 0.05 ~"*"))
+
+#edit for exporting
+A_DUNNETforprint <- A_dunnetx %>% 
+  select(Compound,Variable,group1,statistic, p.value, significant) %>% 
+  ungroup()
+View(A_DUNNETforprint)
+ 
+write.csv(A_DUNNETforprint, "dunnetx_stats_acute.csv")
+
+
+```
+
+Z-score generation-  these are calculated within each compound across doses and parameters
+```{r}
+
+zscore <- tidymaster.forstat %>% 
+  gather(Variable, Value, -Treatment, -newID, -Compound, -Concentration) %>% 
+  group_by(Variable, Compound) %>% 
+  mutate(zscore_group = ((Value - mean(Value, na.rm = T)) / sd(Value, na.rm = T))) %>% 
+  ungroup()
+ 
+# Means for each Treatment
+zscoremean <- zscore %>%
+  select(-Value) %>% 
+   spread(key = Variable, value = zscore_group) %>% 
+   group_by(Compound, Concentration) %>% 
+  summarise(MeanDistance = mean(MeanDistance, na.rm = T),
+            MeanVelocity = mean(MeanVelocity, na.rm = T),
+            FD = mean(FD, na.rm = T),
+            CD = mean(CD, na.rm = T),
+            BD = mean(BD, na.rm = T),
+            Turn = mean(Turn, na.rm = T),
+            AngV = mean(AngV, na.rm = T),
+            Mmean = mean(Mmean, na.rm = T),
+           Mtot = mean(Mtot, na.rm = T)) %>%
+    gather(Parameter, Value, -Compound, -Concentration) %>%
+    mutate(Parameter = as.factor(Parameter)) %>%
+    ungroup()
+ View(zscoremean)
+
+
+#Normalize to vehicle (Treatment - Control) graph these
+zscore_norm <- zscoremean %>%
+  group_by(Concentration) %>%
+  spread(key=Concentration, value = Value) %>% 
+  mutate(`0.1`= (`0.1` - DMSO), #need to use back ticks here
+         `0.3` = (`0.3` - DMSO),
+         `1` = (`1` - DMSO),
+         `3` = (`3` - DMSO),
+         `10` = (`10` - DMSO), 
+         DMSO = (DMSO - DMSO)) %>%  #IF YOU'RE NOT CREATING A NEW COLUMN DMSO NEEDS TO BE LAST! else it will be 0 and all will be subtracted from 0
+ gather(key = "Treatment", value = "Value", -Parameter, -Compound) %>%
+ ungroup() %>%
+ mutate(Treatment = as.factor(Treatment),
+        Parameter = fct_relevel(Parameter, "MeanDistance", "MeanVelocity", "FD", "CD", "BD",
+                                "Turn", "AngV", "Mmean", "Mtot"),
+        Treatment = fct_relevel(Treatment, "DMSO", "0.1", "0.3", "1",
+                                "3", "10"))
+
+```
+
+
+Make a stats dataframe for merging with the zscore dataset
+```{r}
+
+stats_formerge <- A_DUNNETforprint %>% 
+  unite(temp, Compound, group1, Variable, sep = "/") %>% 
+  select(temp, significant) %>% 
+  mutate(temp = as.factor(temp))
+
+```
+
+
+Merge stats and zscores for graphing
+```{r}
+
+psych_forgraph <- zscore_norm %>%
+  unite(temp, Compound, Treatment, Parameter, sep = "/") %>% 
+  mutate(temp = as.factor(temp)) %>%
+  full_join(stats_formerge, by = "temp") %>% 
+  mutate(significant = ifelse(is.na(significant), "ns", significant)) %>%
+  separate(temp, into = c("Compound", "Treatment", "Parameter"), sep = "/") %>%
+  mutate(Parameter = as.factor(Parameter),
+           Parameter = fct_recode(Parameter, "Mean Distance" = "MeanDistance",
+                                  "Mean Velocity" = "MeanVelocity",
+                                  "Freezing Duration" = "FD",
+                                  "Cruising Duration" = "CD",
+                                  "Bursting Duration" = "BD",
+                                  "Turn Angle" = "Turn", "Angular Velocity" = "AngV",
+                                  "Mean Meander" = "Mmean", "Total Meander" = "Mtot"),
+          Parameter = fct_relevel(Parameter,"Total Meander","Mean Meander","Angular Velocity","Turn Angle",
+                                "Freezing Duration",
+                               "Bursting Duration",
+                               "Cruising Duration",
+                                "Mean Velocity", "Mean Distance"),
+         Compound = as.factor(Compound),
+         Compound = fct_relevel(Compound, "AMPH", "MDA", "MDMA", "METH", "COCN", "LSD", "DOI", "DMT", "PSI", "PSY",
+                                "IBO", "KET", "SCOP"),
+         Treatment = as.factor(Treatment),
+         Treatment = fct_relevel(Treatment, "DMSO", "0.1", "0.3", "1", "3", "10"))
+
+
+```
+
+Make heatmap using z-scores
+```{r}
+
+max_abs_val <- max(abs(psych_forgraph$Value))
+
+heatmap_all <- psych_forgraph %>%
+  filter(Treatment != "DMSO") %>% 
+  ggplot(aes(x=Treatment, y=Parameter, fill=Value)) +
+  geom_tile(color = "white", size = 0.5) +
+  coord_equal()+
+  # geom_text(data = filter(psych_forgraph, significant == "*"), label = "*", color = "black", fontface="bold") + #if you want to add the stats directed to the graph as asteriks, can use this line
+  # geom_text(data = filter(psych_forgraph, significant == "**"), label = "**", color = "black", fontface="bold") +
+  scale_fill_distiller(palette = "RdBu", limits = c(-max_abs_val, max_abs_val)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45), 
+        plot.title = element_text(size=16),
+        strip.background = element_rect(fill = "white")) +
+  labs(title = "Acute Exposure (5 dpf)",
+        fill = "Z-score") +
+  xlab(label = xlabel) +
+  facet_grid(~Compound)
+
+
+heatmap_all
+
+ggsave("acute_heatmap.pdf", plot = heatmap_all, width = 12, height = 6, units  = 'in',
+       dpi = 300, limitsize = TRUE) 
+
+```
+
+Significance graph
+```{r}
+
+significance_graph <- psych_forgraph %>%
+  filter(Treatment != "DMSO") %>% 
+  ggplot(aes(x=Treatment, y=Parameter, fill=significant)) +
+  geom_tile(color = "grey") +
+  coord_equal() +
+  scale_fill_manual(values = c("#CCCCFF", "#330066", "white"), #light purple and dark purple hexadecimal codes
+  labels = c("p<0.05", "p<0.01", "not\nsignificant")) +
+  facet_grid( ~ Compound) +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45), 
+         strip.background = element_rect(fill = "white")) +
+  labs(#title = "Acute Exposure (30 min)",
+        fill = "Significance") +
+  xlab(label = xlabel)
+
+significance_graph
+
+
+ggsave("significance_actue.pdf", plot = significance_graph, width = 12, height = 4 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+
+```
+
+Combine graphs
+```{r}
+
+combined_graph <-
+  cowplot::plot_grid(heatmap_all, significance_graph, ncol = 1, align = "v", axis = "lr")
+
+combined_graph
+
+ggsave("combined_acute.pdf", plot = combined_graph, width = 12, height = 5 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+```
+
