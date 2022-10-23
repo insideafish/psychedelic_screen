@@ -1,0 +1,561 @@
+---
+title: "Developmental 5 dpf screen"
+output: html_document
+---
+packages
+```{r}
+library(tidyverse)
+library(plotrix)
+library(emmeans)
+library(purrr)
+library(broom)
+library(forcats)
+library(ggplot2)
+library(rstatix)
+library(tibble)
+library(PMCMRplus)
+library(ggnewscale)
+library(devtools)
+library(ggrastr)
+
+```
+
+```{r}
+excel.names <- c("Experiment", 
+                 "Treatment", 
+                 "Trial", 
+                 "Well",
+                 "Time", 
+                 "DistanceMoved", 
+                 "Velocity", 
+                 "Freezing_freq", 
+                 "Freezing_dur", 
+                 "Cruising_freq", 
+                 "Cruising_dur", 
+                 "Bursting_freq", 
+                 "Bursting_dur", 
+                 "Turn", 
+                 "Ang_vel", 
+                 "Meander_mean", 
+                 "Meander_total")
+```
+
+upload data
+```{r}
+psych <- read.csv("chronic_exposure_rawdata.csv", 
+                skip = 4, 
+                col.names = excel.names) %>%
+  mutate(Experiment = as.factor(Experiment),
+          Treatment = as.factor(Treatment), 
+          Trial = as.factor(Trial), 
+          Well = as.factor(Well), 
+         DistanceMoved = as.numeric(DistanceMoved), 
+         Freezing_freq = as.numeric(Freezing_freq), 
+         Cruising_freq = as.numeric(Cruising_freq), 
+         Bursting_freq = as.numeric(Bursting_freq),
+         Turn = as.numeric(Turn), 
+         Ang_vel = as.numeric(Ang_vel), 
+         Meander_mean = as.numeric(Meander_mean), 
+         Meander_total = as.numeric(Meander_total))
+
+```
+
+Tidy the data
+```{r}
+#excluding frequencies in further analysis
+
+tidymaster.forstat <- psych %>% 
+  separate(col = Time, into = c("InitialTime", "FinalTime"), sep = "-") %>% #Separate initial and final times into two new columns
+  mutate(InitialTime = ifelse(InitialTime == "Start", "0:00:00", InitialTime)) %>% #Reformat Start label
+  separate(col = InitialTime, into = c("Hours", "Minutes", "Seconds"), sep = ":", remove = F) %>% 
+  select(-Hours, -Seconds) %>% 
+  mutate(Minutes = as.numeric(Minutes)) %>% 
+  mutate(Label = case_when( #Label based on time ranges
+    Minutes >= 10 & Minutes < 15 ~ "Light1",
+    Minutes >= 15 & Minutes < 20 ~ "Dark1", 
+    Minutes >= 20 & Minutes < 25 ~ "Light2",
+    Minutes >= 25 & Minutes < 30 ~ "Dark2",
+    Minutes >= 30 & Minutes < 35 ~ "Dark3",
+    Minutes >= 35 & Minutes < 40 ~ "Dark4")) %>%
+ filter(Label != is.na(Label)) %>%
+ unite(newID, Experiment, Trial, Well, Label, sep = "_") %>%
+ select(-InitialTime, -Minutes, -FinalTime) %>%
+  mutate(Treatment = as.factor(Treatment),
+         newID = as.factor(newID)) %>%
+   separate(col = Treatment, into = c("Compound", "Dose"), sep =" ", remove=F) %>%
+  mutate(Compound = as.factor(Compound),
+         Dose = as.factor(Dose),
+         Dose = fct_relevel(Dose, "Vehicle", "0.1", "0.3", "1", "10")) %>%
+  separate(col = newID, into = c("T", "Trial", "Well", "Cycle"), sep = "_", remove = F) %>%
+  select(-T, -Trial, -Well) %>%
+  mutate(Cycle = as.factor(Cycle))
+  
+
+#How many replicates per treatment (n = x - x)
+
+replicatecheck <- tidymaster.forstat %>%
+  filter(Cycle == "Dark1") %>% 
+  group_by(Treatment) %>% 
+  tally()
+
+min(replicatecheck$n) #min
+max(replicatecheck$n) #max
+
+
+```
+
+Stats
+```{r}
+#SHAPIRO- test for normal distribution
+A_shapiro <- tidymaster.forstat %>%
+  gather(Variable, Value, -Treatment, -newID, -Compound, -Dose, -Cycle) %>% 
+  group_by(Variable, Compound, Cycle) %>%
+  nest() %>% 
+   ungroup() %>% 
+   mutate(shapiro = map(data, ~tidy(shapiro.test(.x$Value)))) %>%
+   unnest(shapiro)
+ View(A_shapiro)
+#most not gaussian
+
+
+#LEVENES- test for homogeneity of variances
+A_levene <- tidymaster.forstat %>%
+ gather(Variable, Value, -Treatment, -newID, -Compound, -Dose, -Cycle) %>% 
+  group_by(Variable, Compound, Cycle) %>%
+   nest() %>% 
+   ungroup() %>%
+   mutate(levene = map(data, ~levene_test(.x, Value ~ Treatment))) %>% 
+   unnest(levene)
+  View(A_levene)
+#mostly not homogeneous
+
+#KRUSKAL WALLIS - non-parametric ANOVA
+A_KRUSKAL <- tidymaster.forstat %>%
+  gather(Variable, Value, -Treatment, -newID, -Compound, -Dose, -Cycle) %>% 
+  group_by(Variable, Compound, Cycle) %>%
+  nest() %>% 
+  ungroup() %>% 
+  mutate(kruskal = map(data, ~kruskal_test(.x, Value ~ Treatment))) %>% 
+  unnest(kruskal) 
+View(A_KRUSKAL)
+
+#DUNNET- posthoc treatment vs control (DMSO vs treatment)
+A_dunnetx <- tidymaster.forstat %>% 
+  select(-newID) %>% 
+  gather(Variable, Value, -Treatment, -Compound, -Dose, -Cycle) %>% 
+  group_by(Variable, Compound, Cycle) %>%
+  nest() %>% 
+  mutate(model = map(data, ~PMCMRplus::kwManyOneDunnTest(x=.x$Value, g=.x$Dose, p.adjust.method = "holm", na.rm=T) %>%
+                       toTidy())) %>% 
+  unnest(model) %>% 
+   mutate(significant = case_when(p.value > 0.05 ~ "ns",
+                                  p.value <= 0.01 ~ "**",
+                                  p.value <= 0.05 ~"*"))
+
+
+# edit for exporting
+A_DUNNETforprint <- A_dunnetx %>% 
+  select(Compound,Cycle,group1,Variable,statistic, p.value, significant) %>% 
+  ungroup()
+
+write.csv(A_DUNNETforprint, "dunnetx_stats_5dpf.csv")
+
+```
+
+zscore -  these are calculated within each compound across doses and parameters
+```{r}
+zscore <- tidymaster.forstat %>% 
+  gather(Variable, Value, -Treatment, -newID, -Compound, -Dose, -Cycle) %>% 
+  group_by(Variable, Compound, Cycle) %>% 
+  mutate(zscore_group = ((Value - mean(Value, na.rm = T)) / sd(Value,  na.rm = T))) %>%
+  ungroup() %>% 
+  mutate(Variable = as.factor(Variable))
+
+# Means for each Treatment
+zscoremean <- zscore %>%
+  select(-Value) %>% 
+  spread(key = Variable, value = zscore_group) %>% 
+  group_by(Compound, Dose, Cycle) %>%
+  summarise(MeanDistance = mean(DistanceMoved, na.rm = T),
+            MeanVelocity = mean(Velocity, na.rm = T),
+            FD = mean(Freezing_dur, na.rm = T),
+            CD = mean(Cruising_dur, na.rm = T),
+            BD = mean(Bursting_dur, na.rm = T),
+            Turn = mean(Turn, na.rm = T),
+            AngV = mean(Ang_vel, na.rm = T),
+            Mmean = mean(Meander_mean, na.rm = T),
+           Mtot = mean(Meander_total, na.rm = T)) %>%
+   gather(Parameter, Value, -Compound, -Dose, -Cycle) %>%
+   mutate(Parameter = as.factor(Parameter)) %>%
+  ungroup()
+  View(zscoremean)
+
+#Normalize to vehicle (Treatment - Vehicle), graph these
+zscore_norm <- zscoremean %>%
+  group_by(Dose) %>%
+  spread(key=Dose, value = Value) %>% 
+  mutate(`0.1` = (`0.1` - Vehicle), #need to use back ticks here!
+         `0.3` = (`0.3` - Vehicle),
+         `1` = (`1` - Vehicle),
+         `3` = (`3` - Vehicle),
+         `10` = (`10` - Vehicle),
+         Vehicle = (Vehicle - Vehicle)) %>% 
+  gather(key = "Treatment", value = "Value", -Parameter, -Compound, -Cycle) %>% 
+  ungroup() %>% 
+  mutate(Treatment = as.factor(Treatment),
+         Parameter = fct_relevel(Parameter, "MeanDistance", "MeanVelocity", "FD", "CD", "BD",
+                                 "Turn", "AngV", "Mmean", "Mtot"),
+         Treatment = fct_relevel(Treatment, "Vehicle", "0.1", "0.3", "1",
+                                 "3", "10"))
+
+```
+
+Create stats dataframe to merge
+```{r}
+
+stats_formerge <- A_DUNNETforprint %>% 
+  mutate(Variable = fct_recode(Variable, "MeanDistance" = "DistanceMoved",
+                                  "MeanVelocity" = "Velocity",
+                                  "FD" = "Freezing_dur",
+                                  "CD" = "Cruising_dur",
+                                  "BD" = "Bursting_dur",
+                                  "Turn" = "Turn", "AngV" = "Ang_vel",
+                                  "Mmean" = "Meander_mean", "Mtot" = "Meander_total")) %>%
+  unite(temp, Compound, group1, Cycle, Variable, sep = "/") %>% 
+  select(temp, significant) %>% 
+  mutate(temp = as.factor(temp))
+
+```
+
+Merge stats and zscores for graphing
+```{r}
+
+psych_forgraph <- zscore_norm %>%
+  filter(Treatment != "Vehicle") %>% 
+  unite(temp, Compound, Treatment, Cycle, Parameter, sep = "/") %>% 
+  mutate(temp = as.factor(temp)) %>%
+  inner_join(stats_formerge, by = "temp") %>%
+  mutate(significant = ifelse(is.na(significant), "ns", significant)) %>%
+  separate(temp, into = c("Compound", "Treatment", "Cycle", "Parameter"), sep = "/") %>%
+  mutate(Parameter = as.factor(Parameter),
+           Parameter = fct_recode(Parameter, "Mean Distance" = "MeanDistance",
+                                  "Mean Velocity" = "MeanVelocity",
+                                  "Freezing Duration" = "FD",
+                                  "Cruising Duration" = "CD",
+                                  "Bursting Duration" = "BD",
+                                  "Turn Angle" = "Turn", "Angular Velocity" = "AngV",
+                                  "Mean Meander" = "Mmean", "Total Meander" = "Mtot"),
+         Parameter = fct_relevel(Parameter,"Total Meander","Mean Meander","Angular Velocity","Turn Angle",
+                                "Freezing Duration",
+                               "Bursting Duration",
+                               "Cruising Duration",
+                                "Mean Velocity", "Mean Distance"),
+         Compound = as.factor(Compound),
+         Treatment = as.factor(Treatment),
+         Cycle = as.factor(Cycle),
+         Cycle = fct_relevel(Cycle, "Light1", "Dark1", "Light2", "Dark2", "Dark3", "Dark4"),
+         Treatment = fct_relevel(Treatment, "0.1", "0.3", "1", "3", "10")) %>%
+  mutate(Compound = fct_recode(Compound, "AMPH" = "Amphetamine",
+                              "COCN" ="Cocaine",
+                              "DMT" = "DMT",
+                              "DOI" = "DOI",
+                            "IBO"  = "Ibogaine",
+                            "KET" = "Ketamine",
+                              "LSD" = "LSD",
+                              "MDA" = "MDA",
+                              "MDMA" = "MDMA",
+                              "METH" = "Methamphetamine",
+                              "PSI" = "Psilocin",
+                              "PSY" = "Psilocybin",
+                              "SCOP" = "Scopolamine"), 
+         Compound = fct_relevel(Compound, "AMPH", "MDA", "MDMA", "METH", "COCN", "LSD", "DOI", "DMT", "PSI",
+                                "PSY", "IBO", "KET", "SCOP"))
+
+
+```
+
+Graph- Heatmap
+```{r}
+xlabel <- expression(Treatment~(mu*M))
+
+max_abs_val <- max(abs(psych_forgraph$Value))
+
+heatmap_all <- psych_forgraph %>%
+  filter(Treatment != "Vehicle") %>% 
+  ggplot(aes(x=Treatment, y=Parameter, fill=Value)) +
+  geom_tile(color = "white", size = 0.5) +
+  geom_text(data = filter(psych_forgraph, significant == "*"), label = "*", color = "black", fontface="bold") +
+  geom_text(data = filter(psych_forgraph, significant == "**"), label = "**", color = "black", fontface="bold") +
+  scale_fill_distiller(palette = "RdBu", limits = c(-max_abs_val, max_abs_val)) +
+  theme_bw() +
+  labs(title = "Developmental Exposure (5 dpf)",
+        fill = "Z-score") +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45), 
+        plot.title = element_text(size=20), 
+        strip.background = element_rect(fill = "white")) + 
+  xlab(label = xlabel) +
+  facet_grid(Cycle ~ Compound)
+
+
+ggsave("psych_heatmap_all_5dpf.pdf", plot = heatmap_all, width = 14, height = 12 , units  = 'in',
+       dpi = 300, limitsize = TRUE) 
+
+```
+
+Subset and graph just Dark1
+```{r}
+
+Dark1_psychgraph <- psych_forgraph %>%  #filter data set for Dark1 only
+  filter(Cycle == "Dark1")
+
+max_abs_valDARK1 <- max(abs(Dark1_psychgraph$Value))
+
+heatmap_DARK1 <- Dark1_psychgraph %>%
+  filter(Treatment != "Vehicle") %>% 
+  ggplot(aes(x=Treatment, y=Parameter, fill=Value)) +
+  geom_tile(color = "white") +
+  coord_equal()+ #This makes the tiles squares instead of rectangles
+  #geom_text(data = filter(psych_forgraph, significant == "*"), label = "*", color = "black", fontface="bold") + #if you want stats on the graph use these commented lines
+  #geom_text(data = filter(psych_forgraph, significant == "**"), label = "**", color = "black", fontface="bold") +
+  scale_fill_distiller(palette = "RdBu", limits = c(-max_abs_valDARK1, max_abs_valDARK1)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45), 
+        plot.title = element_text(size=16), 
+        strip.background = element_rect(fill = "white")) +
+  labs(title = "Developmental Exposure (5 dpf)",
+        fill = "Z-score") +
+  xlab(label = xlabel) +
+  facet_grid( ~ Compound)
+
+heatmap_DARK1
+
+ggsave("psych_heatmap_Dark1_5dpf.pdf", plot = heatmap_DARK1, width = 12, height = 6 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+```
+
+Significant values graph- Dark1 only
+```{r}
+xlabel <- expression(Treatment~(mu*M))
+
+significant_DARK1 <- Dark1_psychgraph %>%
+  filter(Treatment != "Vehicle") %>% 
+  ggplot(aes(x=Treatment, y=Parameter, fill=significant)) +
+  geom_tile(color = "grey") +
+  coord_equal() +
+  scale_fill_manual(values = c("#CCCCFF", "#330066", "white"),
+                    labels = c("p<0.05", "p<0.01", "not\nsignificant")) +
+  facet_grid( ~ Compound) +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45), 
+        strip.background = element_rect(fill = "white")) +
+  labs(#title = "Developmental Exposure (5 dpf)",
+        fill = "Significance") +
+   xlab(label = xlabel)
+
+
+ggsave("psych_Dark1_5dpf_significant.pdf", plot = significant_DARK1, width = 12, height = 6 , units  = 'in',
+       dpi = 300, limitsize = TRUE) 
+
+combine plots
+```{r}
+combined_graph <-
+  cowplot::plot_grid(heatmap_DARK1, significant_DARK1, ncol = 1, align = "v", axis = "lr")
+
+combined_graph
+
+ggsave("combined_chronic_5dpf.pdf", plot = combined_graph, width = 12, height = 5 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+```
+
+
+Dot plots for supplemental
+```{r}
+
+View(tidymaster.forstat)
+
+all_forgraph <- tidymaster.forstat %>%
+  gather(Variable, Value, DistanceMoved, Velocity, Freezing_dur, Cruising_dur, Bursting_dur, Turn, Ang_vel, Meander_mean, Meander_total) %>%
+  select(-Freezing_freq, -Cruising_freq, -Bursting_freq) %>%
+  mutate(Variable = as.factor(Variable),
+         Compound = fct_recode(Compound, "AMPH" = "Amphetamine", 
+                              "COCN" ="Cocaine", 
+                              "DMT" = "DMT", 
+                              "DOI" = "DOI", 
+                            "IBO"  = "Ibogaine",
+                            "KET" = "Ketamine",
+                              "LSD" = "LSD", 
+                              "MDA" = "MDA", 
+                              "MDMA" = "MDMA", 
+                              "METH" = "Methamphetamine",
+                              "PSI" = "Psilocin", 
+                              "PSY" = "Psilocybin", 
+                              "SCOP" = "Scopolamine"),
+         Compound = fct_relevel(Compound, "AMPH", "MDA", "MDMA", "METH", "COCN", "LSD", "DOI", "DMT", "PSI",
+                                "PSY", "IBO", "KET", "SCOP"),
+         Dose = fct_recode(Dose, "DMSO" = "Vehicle"),
+         Dose = fct_relevel(Dose, "DMSO", "0.1", "0.3", "1", "3", "10"),
+         Variable = fct_recode(Variable, "Mean\nDistance\n(mm)" = "DistanceMoved", 
+                                  "Mean\nVelocity\n(mm/s)" = "Velocity", 
+                                  "Freezing\nDuration\n(s)" = "Freezing_dur", 
+                                  "Cruising\nDuration\n(s)" = "Cruising_dur",
+                                  "Bursting\nDuration\n(s)" = "Bursting_dur",
+                                  "Turn Angle\n(Degree(°))" = "Turn", "Angular\nVelocity\n(°/s)" = "Ang_vel", 
+                                  "Mean\nMeander\n(°/mm)" = "Meander_mean", "Total\nMeander\n(°/mm)" = "Meander_total"),
+         Variable = fct_relevel(Variable, "Mean\nDistance\n(mm)", "Mean\nVelocity\n(mm/s)", "Freezing\nDuration\n(s)", 
+                                "Cruising\nDuration\n(s)", "Bursting\nDuration\n(s)", "Turn Angle\n(Degree(°))", 
+                                "Angular\nVelocity\n(°/s)", "Mean\nMeander\n(°/mm)","Total\nMeander\n(°/mm)"))
+                                
+
+xlabel <- expression(Treatment~(mu*M))
+
+#LIGHT1
+light1_dotplot <- all_forgraph %>% 
+  filter(Cycle == "Light1") %>% 
+  ggplot(aes(x=Dose, y = Value, color=Dose)) +
+  geom_point_rast(na.rm = T, alpha = 0.7, raster.dpi = 100) + #Rasterizing my geompoints because they are crashing InkScape and powerpoint and I want my life back
+   stat_summary(fun.data = "mean_cl_normal",
+               geom = "errorbar",
+               col = "black",
+               width = 0.2, size = 0.5) +
+  stat_summary(fun="mean", geom="point", 
+               col="black", size=1) +
+  facet_grid(Variable ~ Compound, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45, size = 6.5), 
+        strip.text = element_text(size = 9), 
+        axis.title = element_text(size = 12)) +
+  xlab(label = xlabel) +
+    labs(title = "Developmental Exposure (5 dpf), Light 1",
+      color = xlabel)
+
+light1_dotplot
+
+ggsave("psych_alldot_5dpf_L1.pdf", plot = light1_dotplot, width = 12, height = 12 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+#DARK1
+dark1_dotplot <- all_forgraph %>% 
+  filter(Cycle == "Dark1") %>% 
+  ggplot(aes(x=Dose, y = Value, color=Dose)) +
+  geom_point_rast(na.rm = T, alpha = 0.7, raster.dpi = 100) + #Rasterizing my geompoints because they are crashing InkScape and powerpoint and I want my life back
+   stat_summary(fun.data = "mean_cl_normal",
+               geom = "errorbar",
+               col = "black",
+               width = 0.2, size = 0.5) +
+  stat_summary(fun="mean", geom="point", 
+               col="black", size=1) +
+  facet_grid(Variable ~ Compound, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45, size = 6.5), 
+        strip.text = element_text(size = 9), 
+        axis.title = element_text(size = 12)) +
+  xlab(label = xlabel) +
+    labs(title = "Developmental Exposure (5 dpf), Dark 1",
+      color = xlabel)
+
+
+dark1_dotplot
+ggsave("psych_alldot_5dpf_D1.pdf", plot = dark1_dotplot, width = 12, height = 12 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+#LIGHT2
+light2_dotplot <- all_forgraph %>% 
+  filter(Cycle == "Light2") %>% 
+  ggplot(aes(x=Dose, y = Value, color=Dose)) +
+  geom_point_rast(na.rm = T, alpha = 0.7, raster.dpi = 100) + #Rasterizing my geompoints because they are crashing InkScape and powerpoint and I want my life back
+   stat_summary(fun.data = "mean_cl_normal",
+               geom = "errorbar",
+               col = "black",
+               width = 0.2, size = 0.5) +
+  stat_summary(fun="mean", geom="point", 
+               col="black", size=1) +
+  facet_grid(Variable ~ Compound, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45, size = 6.5), 
+        strip.text = element_text(size = 9), 
+        axis.title = element_text(size = 12)) +
+  xlab(label = xlabel) +
+    labs(title = "Developmental Exposure (5 dpf), Light 2",
+      color = xlabel)
+
+
+ggsave("psych_alldot_5dpf_L2.pdf", plot = light2_dotplot, width = 12, height = 12 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+#DARK2
+dark2_dotplot <- all_forgraph %>% 
+  filter(Cycle == "Dark2") %>% 
+  ggplot(aes(x=Dose, y = Value, color=Dose)) +
+  geom_point_rast(na.rm = T, alpha = 0.7, raster.dpi = 100) + #Rasterizing my geompoints because they are crashing InkScape and powerpoint and I want my life back
+   stat_summary(fun.data = "mean_cl_normal",
+               geom = "errorbar",
+               col = "black",
+               width = 0.2, size = 0.5) +
+  stat_summary(fun="mean", geom="point", 
+               col="black", size=1) +
+  facet_grid(Variable ~ Compound, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45, size = 6.5), 
+        strip.text = element_text(size = 9), 
+        axis.title = element_text(size = 12)) +
+  xlab(label = xlabel) +
+    labs(title = "Developmental Exposure (5 dpf), Dark 2",
+      color = xlabel)
+
+ggsave("psych_alldot_5dpf_D2.pdf", plot = dark2_dotplot, width = 12, height = 12 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+#DARK3
+dark3_dotplot <- all_forgraph %>% 
+  filter(Cycle == "Dark3") %>% 
+  ggplot(aes(x=Dose, y = Value, color=Dose)) +
+  geom_point_rast(na.rm = T, alpha = 0.7, raster.dpi = 100) + #Rasterizing my geompoints because they are crashing InkScape and powerpoint and I want my life back
+   stat_summary(fun.data = "mean_cl_normal",
+               geom = "errorbar",
+               col = "black",
+               width = 0.2, size = 0.5) +
+  stat_summary(fun="mean", geom="point", 
+               col="black", size=1) +
+  facet_grid(Variable ~ Compound, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45, size = 6.5), 
+        strip.text = element_text(size = 9), 
+        axis.title = element_text(size = 12)) +
+  xlab(label = xlabel) +
+    labs(title = "Developmental Exposure (5 dpf), Dark 3",
+      color = xlabel)
+dark3_dotplot
+
+ggsave("psych_alldot_5dpf_D3.pdf", plot = dark3_dotplot, width = 12, height = 12 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+
+#DARK4
+
+dark4_dotplot <- all_forgraph %>% 
+  filter(Cycle == "Dark4") %>% 
+  ggplot(aes(x=Dose, y = Value, color=Dose)) +
+  geom_point_rast(na.rm = T, alpha = 0.7, raster.dpi = 100) + #Rasterizing my geompoints because they are crashing InkScape and powerpoint and I want my life back
+   stat_summary(fun.data = "mean_cl_normal",
+               geom = "errorbar",
+               col = "black",
+               width = 0.2, size = 0.5) +
+  stat_summary(fun="mean", geom="point", 
+               col="black", size=1) +
+  facet_grid(Variable ~ Compound, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45, size = 6.5), 
+        strip.text = element_text(size = 9), 
+        axis.title = element_text(size = 12)) +
+  xlab(label = xlabel) +
+    labs(title = "Developmental Exposure (5 dpf), Dark 4",
+      color = xlabel)
+dark4_dotplot
+
+ggsave("psych_alldot_5dpf_D4.pdf", plot = dark4_dotplot, width = 12, height = 12 , units  = 'in',
+       dpi = 300, limitsize = TRUE)
+
+```
+
